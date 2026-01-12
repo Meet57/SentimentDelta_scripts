@@ -1,248 +1,230 @@
-#!/usr/bin/env python3
-"""
-SentimentDelta - Stock Data Pipeline Main Entry Point
+"""Simple SentimentDelta main script."""
 
-A clean, modular pipeline for downloading stock data, processing it,
-and storing it in MongoDB for further analysis.
-"""
-
-import warnings
-from typing import Dict, Any, List
 from tqdm import tqdm
-
-# Import refactored modules
-from sentiment_delta.config.settings import get_config, Config
-from sentiment_delta.utils.logger import setup_logger, log_operation_start, log_operation_end, log_error
-from sentiment_delta.utils.database import create_mongodb_manager, MongoDBManager
-from sentiment_delta.data.processor import process_multiple_tickers, get_data_summary
-
-warnings.filterwarnings('ignore')
+from config import get_config
+from logger import get_logger
+from database import MongoDBManager
+from data_processor import process_multiple_tickers
+from scraper import scrape_multiple_marketwatch_tickers, scrape_marketwatch_ticker_news, scrape_finviz_ticker_news, scrape_multiple_finviz_tickers
 
 
-def setup_logging(config: Config):
-    """Setup logging based on configuration."""
-    return setup_logger(
-        __name__, 
-        level=config.log_level,
-        log_file=config.log_file
-    )
-
-
-def process_and_store_ticker_data(db_manager: MongoDBManager, config: Config) -> Dict[str, Any]:
-    """
-    Process stock data for all configured tickers and store in MongoDB.
+def store_stock_data(db_manager, ticker_data, config, logger):
+    """Store stock market data in the database.
     
     Args:
         db_manager: MongoDB manager instance
-        config: Configuration instance
-    
+        ticker_data: Dictionary of ticker data from data processor
+        config: Configuration dictionary
+        logger: Logger instance
+        
     Returns:
-        Results summary dictionary
+        Dict with success/failure counts and details
     """
-    logger = setup_logging(config)
-    
-    log_operation_start(logger, "ticker data processing", 
-                       ticker_count=len(config.tickers))
-    
-    # Process all tickers
-    ticker_data = process_multiple_tickers(
-        config.tickers, 
-        period=config.data_period,
-        interval=config.data_interval
-    )
-    
     results = {
         'successful': [],
         'failed': [],
-        'details': {}
+        'total_records': 0
     }
     
-    # Store data for each ticker
-    for ticker, data in tqdm(ticker_data.items(), desc="Storing data"):
+    logger.info(f"Starting to store data for {len(ticker_data)} tickers")
+    
+    for ticker, data in tqdm(ticker_data.items(), desc="Storing stock data"):
         if data is None or data.empty:
+            logger.warning(f"No data available for {ticker}")
             results['failed'].append(ticker)
             continue
         
         try:
-            # Store in MongoDB collection named after ticker
+            # Ensure all column names are strings
+            data.columns = [str(col) for col in data.columns]
+            
+            # Convert to records for MongoDB
             records = data.to_dict('records')
-            total_inserted = db_manager.clear_and_insert_bulk(
-                ticker, records, config.batch_size
+            
+            # Ensure all keys in records are strings
+            clean_records = []
+            for record in records:
+                clean_record = {str(k): v for k, v in record.items()}
+                clean_records.append(clean_record)
+            
+            total_inserted = db_manager.insert_data(
+                f"{ticker}_data", 
+                clean_records, 
+                config['batch_size']
             )
             
-            # Create indexes for better performance
-            indexes = [('Date', -1), ('Close', 1)]
-            db_manager.create_indexes(ticker, indexes)
-            
-            # Get summary
-            summary = get_data_summary(data, ticker)
             results['successful'].append(ticker)
-            results['details'][ticker] = summary
-            
+            results['total_records'] += total_inserted
             logger.info(f"Successfully stored {total_inserted} records for {ticker}")
             
         except Exception as e:
-            log_error(logger, f"storing data for {ticker}", e)
+            logger.error(f"Failed to store data for {ticker}: {e}")
             results['failed'].append(ticker)
     
-    log_operation_end(logger, "ticker data processing",
-                     successful=len(results['successful']),
-                     failed=len(results['failed']))
-    
+    logger.info(f"Stock data storage complete: {len(results['successful'])} successful, {len(results['failed'])} failed")
     return results
 
 
-def print_pipeline_summary(results: Dict[str, Any], config: Config):
-    """Print a summary of the pipeline execution."""
-    print(f"\n{'='*60}")
-    print("PIPELINE EXECUTION SUMMARY")
-    print(f"{'='*60}")
+def fetch_news_data(tickers, max_pages, logger):
+    """Fetch relevant news data from news sources.
     
-    print(f"Tickers processed: {len(config.tickers)}")
-    print(f"Successful: {len(results['successful'])}")
-    print(f"Failed: {len(results['failed'])}")
+    Args:
+        tickers: List of stock tickers to fetch news for
+        max_pages: Maximum number of pages to scrape per ticker
+        logger: Logger instance
+        
+    Returns:
+        Dictionary of news articles by ticker
+    """
+    logger.info(f"Starting news fetch for {len(tickers)} tickers, max {max_pages} pages each")
     
-    if results['successful']:
-        print(f"\n✅ Successfully processed tickers:")
-        for ticker in results['successful']:
-            details = results['details'][ticker]
-            print(f"  • {ticker}: {details['rows']} records ({details['date_range']})")
+    try:
+        news_data = scrape_multiple_marketwatch_tickers(tickers, max_pages, logger)
+        
+        # Log summary
+        total_articles = sum(len(articles) for articles in news_data.values())
+        logger.info(f"News fetching complete: {total_articles} total articles collected")
+        
+        # Log per-ticker summary
+        for ticker, articles in news_data.items():
+            logger.info(f"{ticker}: {len(articles)} articles")
+            
+        return news_data
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch news data: {e}")
+        return {}
+
+
+def store_news_data(db_manager, news_data, config, logger, news_source="news"):
+    """Store news data with embeddings in the database.
     
-    if results['failed']:
-        print(f"\n❌ Failed to process tickers:")
-        for ticker in results['failed']:
-            print(f"  • {ticker}")
+    Args:
+        db_manager: MongoDB manager instance
+        news_data: Dictionary of news articles by ticker
+        config: Configuration dictionary
+        logger: Logger instance
+        
+    Returns:
+        Dict with success/failure counts and details
+    """
+    results = {
+        'successful': [],
+        'failed': [],
+        'total_articles': 0
+    }
     
-    print(f"\n{'='*60}")
+    # Setup embeddings model
+    if not db_manager.setup_embeddings(config['embedding_model']):
+        logger.error("Failed to setup embeddings model")
+        return results
+        
+    logger.info("Embeddings model loaded successfully")
+    logger.info(f"Starting to store news data for {len(news_data)} tickers")
+    
+    for ticker, articles in tqdm(news_data.items(), desc="Storing news data"):
+        if not articles:
+            logger.warning(f"No articles available for {ticker}")
+            results['failed'].append(ticker)
+            continue
+            
+        try:
+            # Add embeddings to articles
+            processed_articles = []
+            for article in articles:
+                processed_article = article.copy()
+                text = article.get('summary', '') or article.get('title', '')
+                
+                if text:
+                    try:
+                        embeddings = db_manager.get_embeddings([text])
+                        if embeddings is not None:
+                            processed_article['embedding'] = embeddings[0].tolist()
+                        else:
+                            logger.warning(f"Failed to generate embedding for article: {article.get('title', 'Unknown')}")
+                    except Exception as e:
+                        logger.warning(f"Error generating embedding: {e}")
+                        
+                processed_articles.append(processed_article)
+            
+            # Store in database
+            total_inserted = db_manager.insert_data(
+                f"{news_source}", 
+                processed_articles, 
+                config['batch_size']
+            )
+            
+            results['successful'].append(ticker)
+            results['total_articles'] += total_inserted
+            logger.info(f"Successfully stored {total_inserted} news articles for {ticker}")
+            
+        except Exception as e:
+            logger.error(f"Failed to store news data for {ticker}: {e}")
+            results['failed'].append(ticker)
+    
+    logger.info(f"News data storage complete: {len(results['successful'])} successful, {len(results['failed'])} failed")
+    return results
 
 
 def main():
-    """Main pipeline execution function."""
-    # Get configuration
+    """Main pipeline."""
     config = get_config()
-    logger = setup_logging(config)
+    logger = get_logger('SentimentDelta', config['log_level'], config['log_file'])
     
-    # Validate configuration
-    validation_errors = config.validate()
-    if validation_errors:
-        logger.error("Configuration validation failed:")
-        for error in validation_errors:
-            logger.error(f"  - {error}")
-        return 1
+    logger.info("Starting SentimentDelta pipeline")
+
+    # Connect to database
+    db_manager = MongoDBManager(config['mongodb_uri'], config['database_name'])
+    if not db_manager.connect():
+        logger.error("Failed to connect to MongoDB")
+        return False
     
-    log_operation_start(logger, "SentimentDelta pipeline", 
-                       tickers=config.tickers,
-                       period=f"{config.data_period} ({config.data_interval})")
-    
-    # Connect to MongoDB
-    try:
-        db_manager = create_mongodb_manager(
-            config.mongodb_uri,
-            config.database_name,
-            config.connection_options
-        )
-    except ConnectionError as e:
-        logger.error(f"Failed to connect to MongoDB: {e}")
-        return 1
+    # news = scrape_marketwatch_ticker_news("AAPL", max_pages=2, logger=logger)
+    # logger.info(news)
     
     try:
-        # Process and store ticker data
-        results = process_and_store_ticker_data(db_manager, config)
+        # # Step 1: Process stock data
+        # logger.info(f"Processing {len(config['tickers'])} tickers")
+        # ticker_data = process_multiple_tickers(
+        #     config['tickers'], 
+        #     config['data_period'],
+        #     config['data_interval'],
+        #     logger
+        # )
         
-        # Print summary
-        print_pipeline_summary(results, config)
+        # # Step 2: Store stock data using modular function
+        # stock_results = store_stock_data(db_manager, ticker_data, config, logger)
+        # logger.info(f"Stock data storage: {len(stock_results['successful'])} successful, {stock_results['total_records']} total records")
         
-        log_operation_end(logger, "SentimentDelta pipeline",
-                         total_tickers=len(config.tickers),
-                         successful=len(results['successful']))
+        # # Step 3: Fetch news data using modular function
+        # news_data = fetch_news_data(config['tickers'], config['scraping_max_pages'], logger)
+
+        # logger.info(f"Fetched news data for {len(news_data)} tickers")
         
-        return 0 if not results['failed'] else 1
+        # # Step 4: Store news data using modular function
+        # news_results = store_news_data(db_manager, news_data, config, logger, news_source="marketwatch_news")
+        # logger.info(f"News data storage: {len(news_results['successful'])} successful, {news_results['total_articles']} total articles")
+        
+        # news = scrape_finviz_ticker_news("AAPL", logger=logger)
+        # logger.info(news)
+
+        # Step 5: Fetch Finviz news data using modular function
+        finviz_news_data = scrape_multiple_finviz_tickers(config['tickers'], logger)
+        logger.info(f"Fetched Finviz news data for {len(finviz_news_data)} tickers")
+
+        # Step 6: Store Finviz news data using modular function
+        finviz_news_results = store_news_data(db_manager, finviz_news_data, config, logger, news_source="finviz_news")
+        logger.info(f"Finviz news data storage: {len(finviz_news_results['successful'])} successful, {finviz_news_results['total_articles']} total articles")
+
+        return True
         
     except Exception as e:
-        log_error(logger, "pipeline execution", e)
-        return 1
-        
-    finally:
-        # Always disconnect from MongoDB
-        db_manager.disconnect()
-
-
-def run_scraping_pipeline(tickers: List[str] = None, max_pages: int = None):
-    """
-    Run the news scraping pipeline.
+        logger.error(f"Pipeline failed: {e}")
+        return False
     
-    Args:
-        tickers: Optional list of tickers to scrape (defaults to config)
-        max_pages: Optional max pages per ticker (defaults to config)
-    """
-    from sentiment_delta.data.scraper import scrape_multiple_tickers, prepare_article_for_storage
-    
-    config = get_config()
-    logger = setup_logging(config)
-    
-    # Use provided tickers or fall back to config
-    tickers = tickers or config.tickers
-    max_pages = max_pages or config.scraping_max_pages
-    
-    log_operation_start(logger, "news scraping pipeline",
-                       tickers=tickers, max_pages=max_pages)
-    
-    # Connect to MongoDB
-    try:
-        db_manager = create_mongodb_manager(
-            config.mongodb_uri,
-            config.database_name,
-            config.connection_options
-        )
-        
-        # Initialize embedding model
-        db_manager.init_embedding_model(config.embedding_model)
-        
-    except ConnectionError as e:
-        logger.error(f"Failed to connect to MongoDB: {e}")
-        return 1
-    
-    try:
-        # Scrape articles
-        scraped_data = scrape_multiple_tickers(tickers, max_pages)
-        
-        # Store articles with embeddings
-        total_articles = 0
-        for ticker, articles in scraped_data.items():
-            if articles:
-                logger.info(f"Storing {len(articles)} articles for {ticker}")
-                
-                for article in articles:
-                    # Prepare article with embeddings
-                    article_with_embedding = prepare_article_for_storage(
-                        article, db_manager.create_embedding
-                    )
-                    
-                    # Store in news collection
-                    db_manager.create_document('news', article_with_embedding)
-                    total_articles += 1
-        
-        log_operation_end(logger, "news scraping pipeline",
-                         total_articles=total_articles)
-        
-        print(f"\nSuccessfully scraped and stored {total_articles} articles")
-        return 0
-        
-    except Exception as e:
-        log_error(logger, "scraping pipeline execution", e)
-        return 1
-        
     finally:
         db_manager.disconnect()
 
 
 if __name__ == "__main__":
-    import sys
-    
-    # Check for scraping mode
-    if len(sys.argv) > 1 and sys.argv[1] == "scrape":
-        exit_code = run_scraping_pipeline()
-    else:
-        exit_code = main()
-    
-    sys.exit(exit_code)
+    main()

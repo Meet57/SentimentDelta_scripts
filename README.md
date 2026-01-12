@@ -1,4 +1,99 @@
-# SentimentDelta - Modular Stock Market Sentiment Analysis
+# SentimentDelta - Simple Stock Market Analysis
+
+A simple, clean Python toolkit for stock data processing and news scraping. Built with simplicity in mind.
+
+## 🚀 Features
+
+- **Simple Design**: Clean, easy-to-understand code
+- **Stock Data**: Download and process stock data from Yahoo Finance
+- **News Scraping**: Scrape financial news with embeddings
+- **MongoDB**: Simple database operations
+- **Logging**: Consistent logging throughout (no print statements!)
+- **Configurable**: Environment variable support
+
+## 📁 Structure
+
+```
+sentiment_delta/
+├── config/settings.py          # Simple configuration
+├── utils/
+│   ├── logger.py              # Simple logging
+│   └── database.py            # MongoDB operations
+├── data/
+│   ├── processor.py           # Stock data processing
+│   └── scraper.py             # News scraping
+└── main.py                    # Main entry point
+```
+
+## ⚡ Quick Start
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Set environment variables
+export MONGODB_URI="your_mongodb_uri"
+export TICKERS="AAPL,GOOGL,MSFT"
+
+# Run stock data pipeline
+python main.py
+
+# Run news scraping
+python main.py scrape
+```
+
+## 🔧 Simple Usage
+
+```python
+from sentiment_delta import get_config, get_logger, create_mongodb_manager
+from sentiment_delta.data import process_ticker_data
+
+# Basic usage
+config = get_config()
+logger = get_logger(__name__)
+data = process_ticker_data('AAPL')
+logger.info(f"Got {len(data)} records for AAPL")
+
+# Database operations
+db = create_mongodb_manager(config.mongodb_uri, config.database_name)
+db.create_document('my_collection', {'ticker': 'AAPL', 'price': 150})
+```
+
+## ⚙️ Configuration
+
+| Variable      | Description             | Default              |
+| ------------- | ----------------------- | -------------------- |
+| `MONGODB_URI` | MongoDB connection      | Development URI      |
+| `TICKERS`     | Comma-separated tickers | `AAPL,GOOGL,MSFT...` |
+| `LOG_LEVEL`   | Logging level           | `INFO`               |
+| `BATCH_SIZE`  | Database batch size     | `1000`               |
+
+## 📊 What It Does
+
+### Stock Data Pipeline
+
+- Downloads hourly stock data for configured tickers
+- Cleans and processes the data
+- Stores in MongoDB (one collection per ticker)
+- Logs all operations
+
+### News Scraping Pipeline
+
+- Scrapes financial news articles
+- Extracts content and creates embeddings
+- Stores in MongoDB with vector search support
+- Logs progress and results
+
+## 🎯 Key Simplifications
+
+- **No Print Statements**: Logger everywhere for clean output
+- **Simple Functions**: No complex classes, just functions
+- **Minimal Config**: Just the essentials
+- **Clear Logging**: Consistent logging across all modules
+- **Easy Imports**: Simple module structure
+- **Less Code**: Removed complexity, kept functionality
+
+This simplified version maintains core functionality while being much easier to understand and modify!
 
 A clean, modular Python toolkit for stock data processing and sentiment analysis. Built with DRY and KISS principles for maximum reusability and maintainability.
 
