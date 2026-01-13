@@ -2,12 +2,17 @@
 
 import time
 import random
+import logging
 from datetime import datetime
 import re
 import requests
 from bs4 import BeautifulSoup
 from newspaper import Article
 from tqdm import tqdm
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 MARKETWATCH_BASE_URL = "https://www.marketwatch.com"
 FINVIZ_BASE_URL = "https://finviz.com"
@@ -57,10 +62,10 @@ def get_article_text(url):
         return None
 
 
-def scrape_marketwatch_ticker_news(ticker, max_pages=5, logger=None):
+def scrape_marketwatch_ticker_news(ticker, max_pages=5, custom_logger=None):
     """Scrape news for a ticker."""
-    if logger:
-        logger.info(f"Starting scrape for {ticker} with {max_pages} pages")
+    use_logger = custom_logger or logger
+    use_logger.info(f"Starting MarketWatch scrape for {ticker} with {max_pages} pages")
     
     session = get_session()
     articles = []
@@ -77,22 +82,18 @@ def scrape_marketwatch_ticker_news(ticker, max_pages=5, logger=None):
             response = session.get(url, timeout=30)
 
             # Status of the page response
-            if logger:
-                logger.info(f"Scraping - URL Status Code: {response.status_code}")
+            use_logger.info(f"Scraping {ticker} page {page} - URL Status Code: {response.status_code}")
 
             if response.status_code == 401:
-                if logger:
-                    logger.warning(f"Access denied (401) for {ticker} page {page}. Trying with new session...")
+                use_logger.warning(f"Access denied (401) for {ticker} page {page}. Trying with new session...")
                 # Try with a new session and different user agent
                 session = get_session()
                 time.sleep(random.uniform(3, 7))
                 response = session.get(url, timeout=30)
-                if logger:
-                    logger.info(f"Retry attempt - Status Code: {response.status_code}")
+                use_logger.info(f"Retry attempt - Status Code: {response.status_code}")
             
             if response.status_code != 200:
-                if logger:
-                    logger.warning(f"Failed to access page {page} for {ticker} (Status: {response.status_code})")
+                use_logger.warning(f"Failed to access page {page} for {ticker} (Status: {response.status_code})")
                 break
             
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -150,8 +151,7 @@ def scrape_marketwatch_ticker_news(ticker, max_pages=5, logger=None):
                 page_articles.append(article_data)
             
             articles.extend(page_articles)
-            if logger:
-                logger.info(f"Page {page}: {len(page_articles)} articles")
+            use_logger.info(f"Page {page}: {len(page_articles)} articles scraped for {ticker}")
             
             if not page_articles:
                 break
@@ -160,19 +160,17 @@ def scrape_marketwatch_ticker_news(ticker, max_pages=5, logger=None):
             time.sleep(random.uniform(2, 4))
             
         except Exception as e:
-            if logger:
-                logger.error(f"Error scraping page {page} for {ticker}: {e}")
+            use_logger.error(f"Error scraping page {page} for {ticker}: {e}")
             break
     
-    if logger:
-        logger.info(f"Scraping complete for {ticker}: {len(articles)} articles")
+    use_logger.info(f"MarketWatch scraping complete for {ticker}: {len(articles)} articles")
     
     return articles
 
-def scrape_finviz_ticker_news(ticker, logger=None):
+def scrape_finviz_ticker_news(ticker, custom_logger=None):
     """Scrape news for a ticker from Finviz."""
-    if logger:
-        logger.info(f"Starting Finviz scrape for {ticker}")
+    use_logger = custom_logger or logger
+    use_logger.info(f"Starting Finviz scrape for {ticker}")
     
     session = get_session()
     articles = []
@@ -185,12 +183,10 @@ def scrape_finviz_ticker_news(ticker, logger=None):
         
         response = session.get(url, timeout=30)
         
-        if logger:
-            logger.info(f"Finviz scraping {ticker} - Status Code: {response.status_code}")
+        use_logger.info(f"Finviz scraping {ticker} - Status Code: {response.status_code}")
         
         if response.status_code != 200:
-            if logger:
-                logger.warning(f"Failed to access Finviz for {ticker} (Status: {response.status_code})")
+            use_logger.warning(f"Failed to access Finviz for {ticker} (Status: {response.status_code})")
             return articles
         
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -199,8 +195,7 @@ def scrape_finviz_ticker_news(ticker, logger=None):
         news_table = soup.find('table', {'id': 'news-table', 'class': 'fullview-news-outer news-table'})
         
         if not news_table:
-            if logger:
-                logger.warning(f"No news table found for {ticker} on Finviz")
+            use_logger.warning(f"No news table found for {ticker} on Finviz")
             return articles
         
         # Find all news rows
@@ -212,8 +207,7 @@ def scrape_finviz_ticker_news(ticker, logger=None):
         
         for row in tqdm(rows, desc=f"Processing {ticker} news", leave=False):
             # Progress tracking
-            if logger:
-                logger.info(f"Processing row {rows.index(row) + 1} of {len(rows)}")
+            use_logger.debug(f"Processing row {rows.index(row) + 1} of {len(rows)} for {ticker}")
             try:
                 # Get timestamp from first td
                 time_cell = row.find('td', {'width': '130'})
@@ -266,8 +260,7 @@ def scrape_finviz_ticker_news(ticker, logger=None):
                         formatted_time = raw_timestamp
                         
                 except Exception as e:
-                    if logger:
-                        logger.debug(f"Could not parse timestamp '{raw_timestamp}': {e}")
+                    use_logger.debug(f"Could not parse timestamp '{raw_timestamp}' for {ticker}: {e}")
                     formatted_time = raw_timestamp
                 
                 # Get news content from second td
@@ -327,45 +320,47 @@ def scrape_finviz_ticker_news(ticker, logger=None):
                 time.sleep(random.uniform(0.1, 0.3))
                 
             except Exception as e:
-                if logger:
-                    logger.warning(f"Error processing news row for {ticker}: {e}")
+                use_logger.warning(f"Error processing news row for {ticker}: {e}")
                 continue
         
-        if logger:
-            logger.info(f"Finviz scraping complete for {ticker}: {len(articles)} articles found")
+        use_logger.info(f"Finviz scraping complete for {ticker}: {len(articles)} articles found")
         
     except Exception as e:
-        if logger:
-            logger.error(f"Error scraping Finviz for {ticker}: {e}")
+        use_logger.error(f"Error scraping Finviz for {ticker}: {e}")
     
     return articles
 
 
 
-def scrape_multiple_marketwatch_tickers(tickers, max_pages=5, logger=None):
+def scrape_multiple_marketwatch_tickers(tickers, max_pages=5, custom_logger=None):
     """Scrape multiple tickers."""
+    use_logger = custom_logger or logger
+    use_logger.info(f"Starting bulk MarketWatch scrape for {len(tickers)} tickers")
+    
     results = {}
     for ticker in tqdm(tickers, desc="Scraping MarketWatch tickers"):
-        results[ticker] = scrape_marketwatch_ticker_news(ticker, max_pages, logger)
-        if logger:
-            logger.info(f"=====Completed scraping for {ticker}")
-            logger.info(results[ticker])
-            logger.info(f"=====Completed scraping for {ticker}")
+        results[ticker] = scrape_marketwatch_ticker_news(ticker, max_pages, use_logger)
+        use_logger.info(f"Completed MarketWatch scraping for {ticker}: {len(results[ticker])} articles")
         # Longer delay between tickers to avoid rate limiting
         time.sleep(random.uniform(5, 10))
+    
+    total_articles = sum(len(articles) for articles in results.values())
+    use_logger.info(f"Bulk MarketWatch scrape completed: {total_articles} total articles from {len(tickers)} tickers")
     return results
 
 
-def scrape_multiple_finviz_tickers(tickers, logger=None):
+def scrape_multiple_finviz_tickers(tickers, custom_logger=None):
     """Scrape multiple tickers from Finviz."""
+    use_logger = custom_logger or logger
+    use_logger.info(f"Starting bulk Finviz scrape for {len(tickers)} tickers")
     
     results = {}
     for ticker in tqdm(tickers, desc="Scraping Finviz tickers"):
-        results[ticker] = scrape_finviz_ticker_news(ticker, logger)
-        if logger:
-            logger.info(f"=====Completed Finviz scraping for {ticker}")
-            logger.info(results[ticker])
-            logger.info(f"=====Completed Finviz scraping for {ticker}")
+        results[ticker] = scrape_finviz_ticker_news(ticker, use_logger)
+        use_logger.info(f"Completed Finviz scraping for {ticker}: {len(results[ticker])} articles")
         # Longer delay between tickers to avoid rate limiting
         time.sleep(random.uniform(5, 10))
+    
+    total_articles = sum(len(articles) for articles in results.values())
+    use_logger.info(f"Bulk Finviz scrape completed: {total_articles} total articles from {len(tickers)} tickers")
     return results

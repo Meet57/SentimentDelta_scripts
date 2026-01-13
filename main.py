@@ -6,6 +6,7 @@ from logger import get_logger
 from database import MongoDBManager
 from data_processor import process_multiple_tickers
 from scraper import scrape_multiple_marketwatch_tickers, scrape_marketwatch_ticker_news, scrape_finviz_ticker_news, scrape_multiple_finviz_tickers
+from scrape_yahoo_finance import scrape_multiple_yahoo_tickers
 
 
 def store_stock_data(db_manager, ticker_data, config, logger):
@@ -208,13 +209,20 @@ def main():
         # news = scrape_finviz_ticker_news("AAPL", logger=logger)
         # logger.info(news)
 
-        # Step 5: Fetch Finviz news data using modular function
-        finviz_news_data = scrape_multiple_finviz_tickers(config['tickers'], logger)
-        logger.info(f"Fetched Finviz news data for {len(finviz_news_data)} tickers")
+        # # Step 5: Fetch Finviz news data using modular function
+        # finviz_news_data = scrape_multiple_finviz_tickers(config['tickers'], logger)
+        # logger.info(f"Fetched Finviz news data for {len(finviz_news_data)} tickers")
 
-        # Step 6: Store Finviz news data using modular function
-        finviz_news_results = store_news_data(db_manager, finviz_news_data, config, logger, news_source="finviz_news")
-        logger.info(f"Finviz news data storage: {len(finviz_news_results['successful'])} successful, {finviz_news_results['total_articles']} total articles")
+        # # Step 6: Store Finviz news data using modular function
+        # finviz_news_results = store_news_data(db_manager, finviz_news_data, config, logger, news_source="finviz_news")
+        # logger.info(f"Finviz news data storage: {len(finviz_news_results['successful'])} successful, {finviz_news_results['total_articles']} total articles")
+
+        # Step 7: Store the news data from yahoo finance
+        yahoo_news_data = scrape_multiple_yahoo_tickers(config['tickers'], 0)
+        logger.info(f"Fetched Yahoo news data for {len(yahoo_news_data)} tickers")
+        logger.info(yahoo_news_data)
+        yahoo_news_results = store_news_data(db_manager, yahoo_news_data, config, logger, news_source="yahoo_news")
+        logger.info(f"Yahoo news data storage: {len(yahoo_news_results['successful'])} successful, {yahoo_news_results['total_articles']} total articles")
 
         return True
         

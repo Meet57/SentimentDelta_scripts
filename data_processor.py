@@ -1,25 +1,29 @@
 """Simple stock data processing."""
 
+import logging
 from typing import List, Dict, Optional
+from tqdm import tqdm
 import yfinance as yf
 import pandas as pd
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-def process_ticker_data(ticker, period="1mo", interval="1d", logger=None):
+
+def process_ticker_data(ticker, period="1mo", interval="1d", custom_logger=None):
     """Download and process stock data for a ticker."""
+    use_logger = custom_logger or logger
     try:
-        if logger:
-            logger.info(f"Downloading {ticker} data: period={period}, interval={interval}")
+        use_logger.info(f"Downloading {ticker} data: period={period}, interval={interval}")
         
         data = yf.download(ticker, period=period, interval=interval, progress=False)
         
         if data.empty:
-            if logger:
-                logger.warning(f"No data returned for {ticker}")
+            use_logger.warning(f"No data returned for {ticker}")
             return None
             
-        if logger:
-            logger.info(f"Downloaded {len(data)} rows for {ticker}")
+        use_logger.info(f"Downloaded {len(data)} rows for {ticker}")
         
         # Simple cleanup
         data.reset_index(inplace=True)
@@ -39,41 +43,38 @@ def process_ticker_data(ticker, period="1mo", interval="1d", logger=None):
         return data
         
     except Exception as e:
-        if logger:
-            logger.error(f"Error processing {ticker}: {str(e)}")
+        use_logger.error(f"Error processing {ticker}: {str(e)}")
         return None
 
 
-def process_multiple_tickers(tickers, period="1mo", interval="1d", logger=None, start_date=None, end_date=None):
+def process_multiple_tickers(tickers, period="1mo", interval="1d", custom_logger=None, start_date=None, end_date=None):
     """Process multiple tickers."""
+    use_logger = custom_logger or logger
+    use_logger.info(f"Starting bulk processing for {len(tickers)} tickers")
+    
     results = {}
     successful = 0
     failed = 0
     
-    for ticker in tickers:
+    for ticker in tqdm(tickers, desc="Processing tickers"):
         try:
-            if logger:
-                logger.info(f"Starting download for {ticker}")
+            use_logger.debug(f"Starting download for {ticker}")
             
-            data = process_ticker_data(ticker, period, interval, logger)
+            data = process_ticker_data(ticker, period, interval, use_logger)
             results[ticker] = data
             
             if data is not None:
                 successful += 1
-                if logger:
-                    logger.info(f"Successfully processed {ticker}: {len(data)} records")
+                use_logger.info(f"Successfully processed {ticker}: {len(data)} records")
             else:
                 failed += 1
-                if logger:
-                    logger.warning(f"Failed to get data for {ticker}")
+                use_logger.warning(f"Failed to get data for {ticker}")
                 
         except Exception as e:
             failed += 1
-            if logger:
-                logger.error(f"Exception processing {ticker}: {str(e)}")
+            use_logger.error(f"Exception processing {ticker}: {str(e)}")
             results[ticker] = None
     
-    if logger:
-        logger.info(f"Processing complete: successful={successful}, failed={failed}")
+    use_logger.info(f"Processing complete: successful={successful}, failed={failed}")
     
     return results

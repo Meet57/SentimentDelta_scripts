@@ -6,8 +6,10 @@ Scrapes news articles from Yahoo Finance with infinite scroll until reaching tar
 import time
 import re
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+from tqdm import tqdm
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -16,10 +18,16 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
+from scraper import get_article_text
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 def create_driver(headless: bool = True) -> webdriver.Chrome:
     """Create and return Chrome driver with optimal settings."""
+    logger.info(f"Creating Chrome driver (headless={headless})")
     options = Options()
     if headless:
         options.add_argument("--headless")
@@ -40,17 +48,29 @@ def create_driver(headless: bool = True) -> webdriver.Chrome:
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(60)  # Increased timeout
         driver.implicitly_wait(10)
+        logger.info("Chrome driver created successfully")
         return driver
     except Exception as e:
-        print(f"Failed to create driver: {e}")
+        logger.error(f"Failed to create driver: {e}")
         raise
 
 
 def check_target_days(html_content: str, target_days: int) -> bool:
     """Check if target days ago pattern is found in content."""
     if target_days == 0:
-        target_days = 1  # Treat 0 as 1 day ago
-
+        # For today's news, scroll until we see 1d ago content
+        patterns = [
+            r'1d ago',
+            r'1 day ago',
+            r'1\s*d\s*ago',
+            r'1\s*day\s*ago'
+        ]
+        found = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
+        if found:
+            logger.debug("Found 1d ago content for target_days=0")
+        return found
+    
+    # For specific days ago
     patterns = [
         rf'{target_days}d ago',
         rf'{target_days} days ago',
@@ -58,7 +78,10 @@ def check_target_days(html_content: str, target_days: int) -> bool:
         rf'{target_days}\s*days?\s*ago'
     ]
     
-    return any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
+    found = any(re.search(pattern, html_content, re.IGNORECASE) for pattern in patterns)
+    if found:
+        logger.debug(f"Found {target_days}d ago content")
+    return found
 
 
 def parse_relative_time_to_date(time_text: str) -> str:
@@ -126,13 +149,27 @@ def parse_relative_time_to_date(time_text: str) -> str:
         return datetime.now().strftime('%Y-%m-%d')
 
 
+def is_hour_based_timestamp(time_text: str) -> bool:
+    """Check if timestamp is hour or minute based (today's news)."""
+    time_text = time_text.lower().strip()
+    hour_minute_patterns = [
+        r'\d+\s*hrs?\s*ago',
+        r'\d+\s*hours?\s*ago',
+        r'\d+\s*mins?\s*ago',
+        r'\d+\s*minutes?\s*ago',
+        r'\d+\s*hour\s*ago',
+        r'\d+\s*minute\s*ago'
+    ]
+    return any(re.search(pattern, time_text) for pattern in hour_minute_patterns)
+
+
 def scroll_and_wait(driver: webdriver.Chrome) -> None:
     """Scroll to bottom and wait for content to load."""
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     time.sleep(2)
 
 
-def extract_news_item(item, symbol) -> Optional[Dict]:
+def extract_news_item(item, symbol, target_days: int = None) -> Optional[Dict]:
     """Extract data from a single news item."""
     try:
         data = {}
@@ -156,7 +193,16 @@ def extract_news_item(item, symbol) -> Optional[Dict]:
             data['timestamp'] = timestamp_text
             # Convert to actual date
             data['date'] = parse_relative_time_to_date(timestamp_text)
+            
+            # If target_days is 0, only include hour-based timestamps
+            if target_days == 0 and not is_hour_based_timestamp(timestamp_text):
+                return None
         
+        # Body
+        if 'url' in data:
+            article_text = get_article_text(data['url'])
+            data['body'] = article_text
+
         # Tickers
         data['tickers'] = symbol
         
@@ -165,7 +211,7 @@ def extract_news_item(item, symbol) -> Optional[Dict]:
         return None
 
 
-def extract_all_news(soup: BeautifulSoup, symbol: str) -> List[Dict]:
+def extract_all_news(soup: BeautifulSoup, symbol: str, target_days: int = None) -> List[Dict]:
     """Extract all news items from page, excluding ads."""
     container = soup.find('ul', class_='stream-items yf-9xydx9')
     if not container:
@@ -184,9 +230,12 @@ def extract_all_news(soup: BeautifulSoup, symbol: str) -> List[Dict]:
         if symbol not in item_html:
             continue
         
-        news_item = extract_news_item(item, symbol)
+        news_item = extract_news_item(item, symbol, target_days)
         if news_item:
             news_items.append(news_item)
+
+        # Sleep responsibly between requests
+        time.sleep(0.5)
     
     return news_items
 
@@ -208,53 +257,62 @@ def scrape_yahoo_finance_news(symbol: str = "AAPL", target_days: int = 1, max_sc
     driver = None
     
     try:
-        print(f"Loading {url}...")
+        logger.info(f"Starting scrape for {symbol} (target_days={target_days})")
+        logger.info(f"Loading {url}...")
         driver = create_driver(headless)
         
         # Load page with retry logic
-        for attempt in range(3):
+        for attempt in tqdm(range(3), desc="Loading page", leave=False):
             try:
                 driver.get(url)
-                print("Page loaded, waiting for content...")
+                logger.info("Page loaded, waiting for content...")
                 WebDriverWait(driver, 45).until(EC.presence_of_element_located((By.CLASS_NAME, "stream-items")))
-                print("Found news container!")
+                logger.info("Found news container!")
                 break
             except Exception as e:
-                print(f"Attempt {attempt + 1} failed: {e}")
+                logger.warning(f"Attempt {attempt + 1} failed: {e}")
                 if attempt == 2:
+                    logger.error("All retry attempts failed")
                     raise
                 time.sleep(5)
         
-        for scroll in range(max_scrolls):
+        target_found = False
+        for scroll in tqdm(range(max_scrolls), desc=f"Scrolling for {target_days}d ago content"):
             if check_target_days(driver.page_source, target_days):
-                print(f"Found {target_days}d ago content after {scroll} scrolls")
+                logger.info(f"Found {target_days if target_days > 0 else '1'}d ago content after {scroll} scrolls")
+                target_found = True
                 break
             
-            print(f"Scrolling... ({scroll + 1}/{max_scrolls})")
             scroll_and_wait(driver)
             time.sleep(1)
         
+        if not target_found:
+            logger.warning(f"Target {target_days}d ago content not found after {max_scrolls} scrolls")
+        
+        logger.info("Parsing page content with BeautifulSoup")
         soup = BeautifulSoup(driver.page_source, 'html.parser')
-        news_items = extract_all_news(soup, symbol)
-        print(f"Scraped {len(news_items)} news items")
+        news_items = extract_all_news(soup, symbol, target_days)
+        logger.info(f"Successfully scraped {len(news_items)} news items for {symbol}")
         return news_items
         
     except Exception as e:
-        print(f"Error during scraping: {e}")
+        logger.error(f"Error during scraping {symbol}: {e}")
         return []
     finally:
         if driver:
             try:
                 driver.quit()
-            except:
-                pass
+                logger.debug("Chrome driver closed successfully")
+            except Exception as e:
+                logger.warning(f"Error closing driver: {e}")
 
 
 def save_news_to_file(news_items: List[Dict], filename: str = "news_data.json") -> None:
     """Save news items to JSON file."""
+    logger.info(f"Saving {len(news_items)} items to {filename}")
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(news_items, f, indent=2, ensure_ascii=False)
-    print(f"Saved {len(news_items)} items to {filename}")
+    logger.info(f"Successfully saved {len(news_items)} items to {filename}")
 
 
 def scrape_and_save(symbol: str = "AAPL", target_days: int = 5, filename: str = "news_data.json", **kwargs) -> List[Dict]:
@@ -263,17 +321,20 @@ def scrape_and_save(symbol: str = "AAPL", target_days: int = 5, filename: str = 
     save_news_to_file(news_items, filename)
     return news_items
 
-
-if __name__ == "__main__":
-    # Example usage
-    print("Scraping AAPL news until 1 day ago...")
-    news = scrape_yahoo_finance_news("AAPL", target_days=1, max_scrolls=20)
+def scrape_multiple_yahoo_tickers(tickers: List[str], target_days: int = 0, ) -> Dict[str, List[Dict]]:
+    """Scrape Yahoo Finance news for multiple tickers."""
+    logger.info(f"Starting bulk scrape for {len(tickers)} tickers")
+    all_news = {}
     
-    print(f"\nFound {len(news)} news items")
-    for i, item in enumerate(news[:3], 1):
-        print(f"{i}. {item.get('headline', 'No headline')}")
-        print(f"   Time: {item.get('timestamp', 'No time')}")
-        print(f"   Tickers: {', '.join(item.get('tickers', []))}")
+    for ticker in tqdm(tickers, desc="Scraping tickers"):
+        try:
+            news = scrape_yahoo_finance_news(ticker, target_days, headless=True)
+            all_news[ticker] = news
+            logger.info(f"Scraped {len(news)} news items for {ticker}")
+        except Exception as e:
+            logger.error(f"Error scraping {ticker}: {e}")
+            all_news[ticker] = []  # Add empty list for failed scrapes
     
-    # Save to file
-    save_news_to_file(news, "aapl_news.json")
+    total_items = sum(len(items) for items in all_news.values())
+    logger.info(f"Bulk scrape completed: {total_items} total items from {len(tickers)} tickers")
+    return all_news
