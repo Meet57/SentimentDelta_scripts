@@ -2,8 +2,7 @@
 
 import time
 import random
-from typing import List, Dict
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 import requests
 from bs4 import BeautifulSoup
@@ -340,6 +339,7 @@ def scrape_finviz_ticker_news(ticker, logger=None):
             logger.error(f"Error scraping Finviz for {ticker}: {e}")
     
     return articles
+
 
 
 def scrape_multiple_marketwatch_tickers(tickers, max_pages=5, logger=None):
