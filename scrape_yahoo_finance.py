@@ -148,28 +148,13 @@ def parse_relative_time_to_date(time_text: str) -> str:
         print(f"Error parsing time '{time_text}': {e}")
         return datetime.now().strftime('%Y-%m-%d')
 
-
-def is_hour_based_timestamp(time_text: str) -> bool:
-    """Check if timestamp is hour or minute based (today's news)."""
-    time_text = time_text.lower().strip()
-    hour_minute_patterns = [
-        r'\d+\s*hrs?\s*ago',
-        r'\d+\s*hours?\s*ago',
-        r'\d+\s*mins?\s*ago',
-        r'\d+\s*minutes?\s*ago',
-        r'\d+\s*hour\s*ago',
-        r'\d+\s*minute\s*ago'
-    ]
-    return any(re.search(pattern, time_text) for pattern in hour_minute_patterns)
-
-
 def scroll_and_wait(driver: webdriver.Chrome) -> None:
     """Scroll to bottom and wait for content to load."""
     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
     time.sleep(2)
 
 
-def extract_news_item(item, symbol, target_days: int = None) -> Optional[Dict]:
+def extract_news_item(item, symbol, target_days: int = None, exact_day_only: bool = False) -> Optional[Dict]:
     """Extract data from a single news item."""
     try:
         data = {}
@@ -194,14 +179,21 @@ def extract_news_item(item, symbol, target_days: int = None) -> Optional[Dict]:
             # Convert to actual date
             data['date'] = parse_relative_time_to_date(timestamp_text)
             
-            # If target_days is 0, only include hour-based timestamps
-            if target_days == 0 and not is_hour_based_timestamp(timestamp_text):
-                return None
+            if target_days is not None:
+                article_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
+                current_date = datetime.now().date()
+                delta_days = (current_date - article_date).days
+                
+                if exact_day_only and delta_days != target_days:
+                    return None
+                elif not exact_day_only and delta_days >= target_days:
+                    return None
         
         # Body
-        if 'url' in data:
-            article_text = get_article_text(data['url'])
-            data['body'] = article_text
+        # TODO: Uncomment to fetch full article text
+        # if 'url' in data:
+        #     article_text = get_article_text(data['url'])
+        #     data['body'] = article_text
 
         # Tickers
         data['tickers'] = symbol
@@ -211,7 +203,7 @@ def extract_news_item(item, symbol, target_days: int = None) -> Optional[Dict]:
         return None
 
 
-def extract_all_news(soup: BeautifulSoup, symbol: str, target_days: int = None) -> List[Dict]:
+def extract_all_news(soup: BeautifulSoup, symbol: str, target_days: int = None, exact_day_only: bool = False) -> List[Dict]:
     """Extract all news items from page, excluding ads."""
     container = soup.find('ul', class_='stream-items yf-9xydx9')
     if not container:
@@ -220,7 +212,7 @@ def extract_all_news(soup: BeautifulSoup, symbol: str, target_days: int = None) 
     items = container.find_all('li', class_='stream-item')
     news_items = []
     
-    for item in items:
+    for item in tqdm(items, desc="Processing news items", leave=False):
         # Skip ads
         if any(cls in item.get('class', []) for cls in ['ad-item', 'native-ad']):
             continue
@@ -230,7 +222,7 @@ def extract_all_news(soup: BeautifulSoup, symbol: str, target_days: int = None) 
         if symbol not in item_html:
             continue
         
-        news_item = extract_news_item(item, symbol, target_days)
+        news_item = extract_news_item(item, symbol, target_days, exact_day_only)
         if news_item:
             news_items.append(news_item)
 
@@ -240,15 +232,16 @@ def extract_all_news(soup: BeautifulSoup, symbol: str, target_days: int = None) 
     return news_items
 
 
-def scrape_yahoo_finance_news(symbol: str = "AAPL", target_days: int = 1, max_scrolls: int = 50, headless: bool = True) -> List[Dict]:
+def scrape_yahoo_finance_news(symbol: str = "AAPL", target_days: int = 1, max_scrolls: int = 50, headless: bool = True, exact_day_only: bool = False) -> List[Dict]:
     """
     Scrape Yahoo Finance news until reaching target days ago content.
     
     Args:
         symbol: Stock symbol (default: AAPL)
-        target_days: Number of days to scroll back to (default: 5)
+        target_days: Number of days to scroll back to (default: 1)
         max_scrolls: Maximum scrolls to prevent infinite loops (default: 50)
         headless: Run browser in background (default: True)
+        exact_day_only: If True, return only news from exactly target_days ago (default: False)
     
     Returns:
         List of news item dictionaries
@@ -278,20 +271,20 @@ def scrape_yahoo_finance_news(symbol: str = "AAPL", target_days: int = 1, max_sc
         
         target_found = False
         for scroll in tqdm(range(max_scrolls), desc=f"Scrolling for {target_days}d ago content"):
-            if check_target_days(driver.page_source, target_days):
+            if check_target_days(driver.page_source, 0 if target_days==0 else target_days+1):
                 logger.info(f"Found {target_days if target_days > 0 else '1'}d ago content after {scroll} scrolls")
                 target_found = True
                 break
             
             scroll_and_wait(driver)
             time.sleep(1)
-        
+
         if not target_found:
             logger.warning(f"Target {target_days}d ago content not found after {max_scrolls} scrolls")
         
         logger.info("Parsing page content with BeautifulSoup")
         soup = BeautifulSoup(driver.page_source, 'html.parser')
-        news_items = extract_all_news(soup, symbol, target_days)
+        news_items = extract_all_news(soup, symbol, target_days, exact_day_only)
         logger.info(f"Successfully scraped {len(news_items)} news items for {symbol}")
         return news_items
         
@@ -314,13 +307,6 @@ def save_news_to_file(news_items: List[Dict], filename: str = "news_data.json") 
         json.dump(news_items, f, indent=2, ensure_ascii=False)
     logger.info(f"Successfully saved {len(news_items)} items to {filename}")
 
-
-def scrape_and_save(symbol: str = "AAPL", target_days: int = 5, filename: str = "news_data.json", **kwargs) -> List[Dict]:
-    """Scrape news and save to file in one call."""
-    news_items = scrape_yahoo_finance_news(symbol, target_days, **kwargs)
-    save_news_to_file(news_items, filename)
-    return news_items
-
 def scrape_multiple_yahoo_tickers(tickers: List[str], target_days: int = 0, ) -> Dict[str, List[Dict]]:
     """Scrape Yahoo Finance news for multiple tickers."""
     logger.info(f"Starting bulk scrape for {len(tickers)} tickers")
@@ -338,3 +324,9 @@ def scrape_multiple_yahoo_tickers(tickers: List[str], target_days: int = 0, ) ->
     total_items = sum(len(items) for items in all_news.values())
     logger.info(f"Bulk scrape completed: {total_items} total items from {len(tickers)} tickers")
     return all_news
+
+if __name__ == "__main__":
+    # Example usage
+    news_data = scrape_yahoo_finance_news("AMZN", 0, exact_day_only=True)
+    save_news_to_file(news_data, f"yahoo_finance_news+{datetime.now().strftime('%Y%m%d')}.json")
+    # print(parse_relative_time_to_date("22 hrs ago"))
